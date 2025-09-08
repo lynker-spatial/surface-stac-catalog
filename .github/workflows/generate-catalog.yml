@@ -69,3 +69,6 @@ jobs:
       - name: Download CSV
         run: curl -L  -o "data/metadata.csv" "${STAC_URL}"
 
+      - name: Generate Catalog
+        run: python scripts/generate_catalog.py
+
