@@ -1,0 +1,71 @@
+name: Generate STAC Catalog
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  STAC_URL: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSy7HjKE3wRmzXX9uiAUD4fKPWoViTfuqW06Olx9sSpmuh_C1cwJZh3RU-PP4qwyNnYMuQ-rgMrDHGV/pub?gid=0&single=true&output=csv"
+
+
+jobs:
+  # Checks the published Google Sheet for
+  # changes. If changes exist since the last
+  # run, then execute the next job.
+  check:
+    name: Check Metadata for Updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      metadata_modified: ${{ steps.metadata-csv.outputs.metadata_modified }}
+
+    steps:
+      - name: Restore previous hash
+        id: metadata-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: metadata.csv.sha256sum
+          key: metadata-0
+
+      - name: Check for Updates
+        id: metadata-csv
+        run: |
+          curl -L  -o "metadata.csv" "${STAC_URL}"
+          sha256sum -c --status "metadata.csv.sha256sum"
+          if [[ $? -eq 0 ]]; then
+            echo "metadata_modified=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::group::Metadata Modified"
+            echo "::notice::Previous hash : $(cat metadata.csv.sha256sum)"
+            sha256sum "metadata.csv" > "metadata.csv.sha256sum"
+            echo "::notice::Current hash  : $(cat metadata.csv.sha256sum)"
+            echo "::endgroup::"
+            echo "metadata_modified=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save current hash
+        id: metadata-cache-save
+        if: steps.metadata-csv.outputs.metadata_modified == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: metadata.csv.sha256sum
+          key: ${{ steps.metadata-cache-restore.outputs.cache-primary-key }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: check
+
+    # Only run the build job if the check job outputs that the
+    # google sheet metadata has been modified/updated.
+    if: needs.check.outputs.metadata_modified == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Download CSV
+        run: curl -L  -o "data/metadata.csv" "${STAC_URL}"
+
