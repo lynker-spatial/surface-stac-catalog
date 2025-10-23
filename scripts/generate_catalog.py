@@ -281,12 +281,12 @@ def _transform_to_wgs84(bounds, src_crs) -> Optional[List[float]]:
 
 
 def _bbox_epsg_from_geotiff_like(url: str) -> Optional[Tuple[List[float], Optional[int]]]:
-    """Handle .tif/.tiff and .vrt via rasterio. Returns (bbox_wgs84, epsg_from_dataset)."""
+    """Handle .tif/.tiff, .zip and .vrt via rasterio. Returns (bbox_wgs84, epsg_from_dataset)."""
     try:
         import rasterio
         env_opts = {
             "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",   # speed over HTTP
-            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.xml",
+            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.xml,.zip",
             "AWS_NO_SIGN_REQUEST": "YES",                  # public S3
         }
         with rasterio.Env(**env_opts):
