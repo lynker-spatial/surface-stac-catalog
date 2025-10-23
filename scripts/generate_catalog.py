@@ -312,79 +312,86 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
         import xarray as xr
         import rasterio
 
+    except Exception as e:
+        print(f"[warn] Failed to import xarray/rioxarray: {e}")
+        return None
+
+    # xarray (more reliable for OPeNDAP/dodsC) 
+    # We explicitly use the 'netcdf4' engine and 'chunks={}' to ensure no data is downloaded.
+    try:
+        # Use chunks={} to force lazy loading with Dask
+        with xr.open_dataset(url, engine="netcdf4", chunks={}) as ds:
+            for _, da in ds.data_vars.items():
+                dims = set(da.dims)
+                if {"y", "x"}.issubset(dims) or {"lat", "lon"}.issubset(dims):
+                    try:
+                        if {"lat", "lon"}.issubset(da.coords):
+                            lat = da["lat"].values
+                            lon = da["lon"].values
+                            lon_min = float(lon.min())
+                            lon_max = float(lon.max())
+                            lat_min = float(lat.min())
+                            lat_max = float(lat.max())
+                            return [lon_min, lat_min, lon_max, lat_max], 4326
+                    except Exception:
+                        pass
+                    try:
+                        _ = da.rio.crs  # may raise
+                        bounds = da.rio.bounds()
+                        crs = da.rio.crs
+                        if crs and bounds:
+                            epsg = crs.to_epsg() if crs else None
+                            if epsg == 4326:
+                                return [bounds[0], bounds[1], bounds[2], bounds[3]], epsg
+                            b_wgs84 = _transform_to_wgs84(
+                                (bounds[0], bounds[1], bounds[2], bounds[3]), crs
+                            )
+                            if b_wgs84:
+                                return b_wgs84, epsg
+                    except Exception:
+                        pass
+            
+            # CF global attributes fallback
+            for names in (
+                ("geospatial_lon_min", "geospatial_lat_min", "geospatial_lon_max", "geospatial_lat_max"),
+                ("geospatial_longitude_min", "geospatial_latitude_min", "geospatial_longitude_max", "geospatial_latitude_max"),
+            ):
+                try:
+                    lon_min = float(ds.attrs.get(names[0]))
+                    lat_min = float(ds.attrs.get(names[1]))
+                    lon_max = float(ds.attrs.get(names[2]))
+                    lat_max = float(ds.attrs.get(names[3]))
+                    return [lon_min, lat_min, lon_max, lat_max], 4326
+                except Exception:
+                    continue
+    except Exception:
+        pass  # Failed, so we'll try rioxarray
+
+    # rioxarray 
+    try:
         env_opts = {
             "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
             "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".nc",
         }
-
-        # Strategy A: try opening as a raster directly
         with rasterio.Env(**env_opts):
-            try:
-                da = rxr.open_rasterio(url, masked=True)
-                crs = getattr(da.rio, "crs", None)
-                bounds = getattr(da.rio, "bounds", None)
-                if crs and bounds:
-                    epsg = crs.to_epsg() if crs else None
-                    if epsg == 4326:
-                        return [bounds[0], bounds[1], bounds[2], bounds[3]], epsg
-                    b_src = (bounds[0], bounds[1], bounds[2], bounds[3])
-                    b_wgs84 = _transform_to_wgs84(b_src, crs)
-                    if b_wgs84:
-                        return b_wgs84, epsg
-            except Exception:
-                pass
+            da = rxr.open_rasterio(url, masked=True)
+            crs = getattr(da.rio, "crs", None)
+            bounds = getattr(da.rio, "bounds", None)
+            if crs and bounds:
+                epsg = crs.to_epsg() if crs else None
+                if epsg == 4326:
+                    return [bounds[0], bounds[1], bounds[2], bounds[3]], epsg
+                b_src = (bounds[0], bounds[1], bounds[2], bounds[3])
+                b_wgs84 = _transform_to_wgs84(b_src, crs)
+                if b_wgs84:
+                    return b_wgs84, epsg
+    except Exception:
+        pass # Both strategies failed
 
-        # Strategy B: xarray dataset → pick a variable with spatial dims
-        ds = xr.open_dataset(url)
-        for _, da in ds.data_vars.items():
-            dims = set(da.dims)
-            if {"y", "x"}.issubset(dims) or {"lat", "lon"}.issubset(dims):
-                try:
-                    if {"lat", "lon"}.issubset(da.coords):
-                        lat = da["lat"].values
-                        lon = da["lon"].values
-                        lon_min = float(lon.min())
-                        lon_max = float(lon.max())
-                        lat_min = float(lat.min())
-                        lat_max = float(lat.max())
-                        return [lon_min, lat_min, lon_max, lat_max], 4326
-                except Exception:
-                    pass
-                try:
-                    _ = da.rio.crs  # may raise
-                    bounds = da.rio.bounds()
-                    crs = da.rio.crs
-                    if crs and bounds:
-                        epsg = crs.to_epsg() if crs else None
-                        if epsg == 4326:
-                            return [bounds[0], bounds[1], bounds[2], bounds[3]], epsg
-                        b_wgs84 = _transform_to_wgs84(
-                            (bounds[0], bounds[1], bounds[2], bounds[3]), crs
-                        )
-                        if b_wgs84:
-                            return b_wgs84, epsg
-                except Exception:
-                    pass
-
-        # Strategy C: CF global attributes fallback
-        for names in (
-            ("geospatial_lon_min", "geospatial_lat_min", "geospatial_lon_max", "geospatial_lat_max"),
-            ("geospatial_longitude_min", "geospatial_latitude_min", "geospatial_longitude_max", "geospatial_latitude_max"),
-        ):
-            try:
-                lon_min = float(ds.attrs.get(names[0]))
-                lat_min = float(ds.attrs.get(names[1]))
-                lon_max = float(ds.attrs.get(names[2]))
-                lat_max = float(ds.attrs.get(names[3]))
-                return [lon_min, lat_min, lon_max, lat_max], 4326
-            except Exception:
-                continue
-
-        return None
-    except Exception as e:
-        print(f"[warn] NetCDF read failed for {url}: {e}")
-        UNREACHABLE_URLS.append(url)
-        return None
+    # If we're here, both failed
+    print(f"[warn] NetCDF read failed for {url}")
+    UNREACHABLE_URLS.append(url)
+    return None
 
 
 def bbox_from_single_asset(asset_url: str) -> Tuple[Optional[List[float]], Optional[int]]:
