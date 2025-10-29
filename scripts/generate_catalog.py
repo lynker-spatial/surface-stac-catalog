@@ -99,7 +99,7 @@ class STACMetadata:
 # Utilities
 # ----------------------------
 def sanitize_id(value) -> str:
-    """Return a safe STAC id (string, limited charset)."""
+    """Return a STAC id (string, limited charset)."""
     s = str(value).strip()
     if not s:
         s = "unnamed"
@@ -518,7 +518,7 @@ def main() -> None:
                     pystac.Provider(
                         name="Lynker",
                         roles=[pystac.ProviderRole.PRODUCER, pystac.ProviderRole.HOST],
-                        url="https://lynker.com",
+                        #url="",
                     )
                 ],
             )
