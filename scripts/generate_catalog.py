@@ -4,7 +4,7 @@
 #     "polars",
 #     "pystac",
 #     "rasterio",
-#     "rioxarray", 
+#     "rioxarray",
 #     "xarray",
 #     "netcdf4",
 #     "gdal",
@@ -47,10 +47,12 @@ REQUIRED_COLS = {
     "id",
     "domain",
     "region",
+    "release_version",
     "source",
     "resolution",
     "horizontal_crs",
-    "vertical_datum",
+    "original_vdatum",
+    "current_vdatum",
     "vertical_datum_conversion",
     "priority",
     "source_url",
@@ -71,8 +73,12 @@ def ensure_gdal_env():
     """Best effort: set GDAL/PROJ paths from CONDA_PREFIX if not already set."""
     prefix = os.environ.get("CONDA_PREFIX")
     if prefix:
-        os.environ.setdefault("GDAL_DATA", os.path.join(prefix, "Library", "share", "gdal"))
-        os.environ.setdefault("PROJ_LIB", os.path.join(prefix, "Library", "share", "proj"))
+        os.environ.setdefault(
+            "GDAL_DATA", os.path.join(prefix, "Library", "share", "gdal")
+        )
+        os.environ.setdefault(
+            "PROJ_LIB", os.path.join(prefix, "Library", "share", "proj")
+        )
 
 
 # ----------------------------
@@ -84,9 +90,11 @@ class STACMetadata:
     domain: str
     region: str
     source: str
+    release_version: str
     resolution: str
     horizontal_crs: str
-    vertical_datum: str
+    original_vdatum: str
+    current_vdatum: str
     vertical_datum_conversion: str
     priority: Optional[int]
     source_url: str
@@ -127,7 +135,9 @@ def read_metadata_from_csv() -> pl.DataFrame:
     # Validate required columns
     missing = REQUIRED_COLS - set(df.columns)
     if missing:
-        raise ValueError(f"CSV missing required columns: {sorted(missing)}. Present: {df.columns}")
+        raise ValueError(
+            f"CSV missing required columns: {sorted(missing)}. Present: {df.columns}"
+        )
 
     # Safe cast priority by name (non-numeric -> null)
     df = df.with_columns(pl.col("priority").cast(pl.Int64, strict=False))
@@ -138,10 +148,12 @@ def read_metadata_from_csv() -> pl.DataFrame:
             df = df.with_columns(pl.lit(None).alias(opt))
 
     # Force id/domain to strings to avoid PySTAC cache key errors
-    df = df.with_columns([
-        pl.col("id").cast(pl.Utf8),
-        pl.col("domain").cast(pl.Utf8),
-    ])
+    df = df.with_columns(
+        [
+            pl.col("id").cast(pl.Utf8),
+            pl.col("domain").cast(pl.Utf8),
+        ]
+    )
 
     return df
 
@@ -174,14 +186,23 @@ def parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
 
 # Fast reachability with immediate logging
 def is_url_ok(url: str, timeout: int = 3) -> bool:
-    """Fast reachability check; logs failures immediately."""
+    """Fast reachability check; logs failures immediately.
+    Bypasses private S3 URLs to prevent skipping valid assets"""
+
+    hl = url.lower()
+
+    # trust private S3 bucket paths / endpoints
+    if "spatial-water-noaa" in hl:
+        return True
+
+    # standard check for public assets
     try:
         req = Request(url, method="HEAD")
         with urlopen(req, timeout=timeout) as resp:
             return 200 <= resp.status < 400
     except Exception:
         try:
-            req = Request(url)  # GET fallback (some CDNs reject HEAD)
+            req = Request(url)  # GET fallback
             with urlopen(req, timeout=timeout) as resp:
                 return 200 <= resp.status < 400
         except (HTTPError, URLError) as e:
@@ -197,6 +218,7 @@ def is_url_ok(url: str, timeout: int = 3) -> bool:
 
 # matches http/https URLs until whitespace or a closing bracket/quote
 _URL_RE = re.compile(r'https?://[^\s\'",]+', re.IGNORECASE)
+
 
 def parse_asset_urls(value: Optional[str]) -> List[str]:
     """
@@ -257,13 +279,15 @@ def geojson_polygon_from_bbox(bbox: List[float]) -> dict:
     minx, miny, maxx, maxy = bbox
     return {
         "type": "Polygon",
-        "coordinates": [[
-            [minx, miny],
-            [minx, maxy],
-            [maxx, maxy],
-            [maxx, miny],
-            [minx, miny],
-        ]],
+        "coordinates": [
+            [
+                [minx, miny],
+                [minx, maxy],
+                [maxx, maxy],
+                [maxx, miny],
+                [minx, miny],
+            ]
+        ],
     }
 
 
@@ -274,31 +298,49 @@ def _transform_to_wgs84(bounds, src_crs) -> Optional[List[float]]:
     """Transform (minx, miny, maxx, maxy) from src_crs to EPSG:4326."""
     try:
         from rasterio.warp import transform_bounds
+
         return list(transform_bounds(src_crs, "EPSG:4326", *bounds, densify_pts=21))
     except Exception as e:
         print(f"[warn] transform to WGS84 failed: {e}")
         return None
 
 
-def _bbox_epsg_from_geotiff_like(url: str) -> Optional[Tuple[List[float], Optional[int]]]:
-    """Handle .tif/.tiff, .zip and .vrt via rasterio. Returns (bbox_wgs84, epsg_from_dataset)."""
+def _bbox_epsg_from_geotiff_like(
+    url: str,
+) -> Optional[Tuple[List[float], Optional[int]]]:
+    """Handle .tif/.tiff, .zip and .vrt via rasterio abd active AWS credentials"""
     try:
         import rasterio
+
         env_opts = {
-            "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",   # speed over HTTP
+            "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",  # speed over HTTP
             "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.xml,.zip",
-            "AWS_NO_SIGN_REQUEST": "YES",                  # public S3
         }
+
+        # Check if AWS crendentials or profiles are active in the environment
+        if os.environ.get("AWS_ACCESS_KEY_ID") or os.envion.get("AWS_PROFILE"):
+            env_opts["AWS_NO_SIGN_REQUEST"] = "NO"
+            if os.environ.get("AWS_PROFILE"):
+                env_opts["AWS_PROFILE"] = os.environ.get("AWS_PROFILE")
+            if os.environ.get("AWS_DEFAULT_REGION"):
+                env_opts["AWS_DEFAULT_REGION"] = os.environ.get("AWS_DEFAULT_REGION")
+        else:
+            # Fallback for public S3 buckets when no AWS keys are present
+            env_opts["AWS_NO_SIGN_REQUEST"] = "YES"
+
         with rasterio.Env(**env_opts):
             with rasterio.open(url) as ds:
                 b = ds.bounds  # (left, bottom, right, top) in ds.crs
                 crs = ds.crs
                 epsg = crs.to_epsg() if crs else None
                 if crs:
-                    b_wgs84 = _transform_to_wgs84((b.left, b.bottom, b.right, b.top), crs)
+                    b_wgs84 = _transform_to_wgs84(
+                        (b.left, b.bottom, b.right, b.top), crs
+                    )
                 else:
                     b_wgs84 = None
                 return (b_wgs84, epsg) if b_wgs84 else None
+
     except Exception as e:
         print(f"[warn] GeoTIFF/VRT read failed for {url}: {e}")
         UNREACHABLE_URLS.append(url)
@@ -316,7 +358,7 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
         print(f"[warn] Failed to import xarray/rioxarray: {e}")
         return None
 
-    # xarray (more reliable for OPeNDAP/dodsC) 
+    # xarray (more reliable for OPeNDAP/dodsC)
     # We explicitly use the 'netcdf4' engine and 'chunks={}' to ensure no data is downloaded.
     try:
         # Use chunks={} to force lazy loading with Dask
@@ -342,7 +384,12 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
                         if crs and bounds:
                             epsg = crs.to_epsg() if crs else None
                             if epsg == 4326:
-                                return [bounds[0], bounds[1], bounds[2], bounds[3]], epsg
+                                return [
+                                    bounds[0],
+                                    bounds[1],
+                                    bounds[2],
+                                    bounds[3],
+                                ], epsg
                             b_wgs84 = _transform_to_wgs84(
                                 (bounds[0], bounds[1], bounds[2], bounds[3]), crs
                             )
@@ -350,11 +397,21 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
                                 return b_wgs84, epsg
                     except Exception:
                         pass
-            
+
             # CF global attributes fallback
             for names in (
-                ("geospatial_lon_min", "geospatial_lat_min", "geospatial_lon_max", "geospatial_lat_max"),
-                ("geospatial_longitude_min", "geospatial_latitude_min", "geospatial_longitude_max", "geospatial_latitude_max"),
+                (
+                    "geospatial_lon_min",
+                    "geospatial_lat_min",
+                    "geospatial_lon_max",
+                    "geospatial_lat_max",
+                ),
+                (
+                    "geospatial_longitude_min",
+                    "geospatial_latitude_min",
+                    "geospatial_longitude_max",
+                    "geospatial_latitude_max",
+                ),
             ):
                 try:
                     lon_min = float(ds.attrs.get(names[0]))
@@ -367,7 +424,7 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
     except Exception:
         pass  # Failed, so we'll try rioxarray
 
-    # rioxarray 
+    # rioxarray
     try:
         env_opts = {
             "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -386,7 +443,7 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
                 if b_wgs84:
                     return b_wgs84, epsg
     except Exception:
-        pass # Both strategies failed
+        pass  # Both strategies failed
 
     # If we're here, both failed
     print(f"[warn] NetCDF read failed for {url}")
@@ -394,7 +451,9 @@ def _bbox_epsg_from_netcdf(url: str) -> Optional[Tuple[List[float], Optional[int
     return None
 
 
-def bbox_from_single_asset(asset_url: str) -> Tuple[Optional[List[float]], Optional[int]]:
+def bbox_from_single_asset(
+    asset_url: str,
+) -> Tuple[Optional[List[float]], Optional[int]]:
     """Return (bbox_WGS84, epsg) for a single asset URL."""
     hl = asset_url.lower()
     if hl.endswith((".tif", ".tiff", ".vrt")):
@@ -411,7 +470,9 @@ def bbox_from_single_asset(asset_url: str) -> Tuple[Optional[List[float]], Optio
 # ----------------------------
 # Time handling: datetime OR start/end
 # ----------------------------
-def build_item_time(csv_datetime: Optional[str], asset_url: Optional[str]) -> Tuple[Optional[datetime], dict]:
+def build_item_time(
+    csv_datetime: Optional[str], asset_url: Optional[str]
+) -> Tuple[Optional[datetime], dict]:
     """
     Returns (item_datetime, properties). If csv_datetime is missing:
     - Try (start,end) from NetCDF asset; if found, set start/end and return (None, props)
@@ -446,14 +507,20 @@ def temporal_from_single_asset(asset_url: str) -> Optional[Tuple[datetime, datet
     except Exception:
         return None
 
-    if not (asset_url.lower().endswith(".nc") or "thredds/dodsC" in asset_url.lower() or "opendap" in asset_url.lower()):
+    if not (
+        asset_url.lower().endswith(".nc")
+        or "thredds/dodsC" in asset_url.lower()
+        or "opendap" in asset_url.lower()
+    ):
         return None
 
     def to_dt(v) -> Optional[datetime]:
         try:
             if isinstance(v, np.datetime64):
                 ts_ns = v.astype("datetime64[ns]").astype("int64")
-                return datetime.utcfromtimestamp(ts_ns / 1e9).replace(tzinfo=timezone.utc)
+                return datetime.utcfromtimestamp(ts_ns / 1e9).replace(
+                    tzinfo=timezone.utc
+                )
         except Exception:
             pass
         if isinstance(v, (str, bytes)):
@@ -493,6 +560,7 @@ def main() -> None:
     )
 
     domain_collections: Dict[str, pystac.Collection] = {}
+    sub_collections: Dict[str, pystac.Collection] = {}
     derived_bboxes: List[Dict] = []  # collect for QGIS GeoJSON export
 
     for row in df.iter_rows(named=True):
@@ -500,6 +568,7 @@ def main() -> None:
 
         domain_id = sanitize_id(meta.domain)
         row_id = sanitize_id(meta.id)  # CSV "id" becomes sub-collection id base
+        region_id = sanitize_id(meta.region)
 
         # Get or create DOMAIN collection
         domain_coll = domain_collections.get(domain_id)
@@ -507,42 +576,52 @@ def main() -> None:
             domain_coll = pystac.Collection(
                 id=domain_id,
                 title=f"{domain_id} Datasets",
-                description=f"Geospatial data related to the {domain_id} domain.",
+                description=f"Topobathy data related to the {domain_id} domain.",
                 extent=pystac.Extent(
                     spatial=pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]]),
                     temporal=pystac.TemporalExtent([[None, None]]),
                 ),
                 license="proprietary",
-                keywords=["topobathy", "hydrofabric", "DEM", "coastal", "NWM", "oCONUS", "CONUS"],
+                keywords=[
+                    "topobathy",
+                    "hydrofabric",
+                    "DEM",
+                    "coastal",
+                    "NWM",
+                    "oCONUS",
+                    "CONUS",
+                ],
                 providers=[
                     pystac.Provider(
-                        name="Lynker",
+                        name="NOAA-OWP",
                         roles=[pystac.ProviderRole.PRODUCER, pystac.ProviderRole.HOST],
-                        #url="",
+                        # url="",
                     )
                 ],
             )
             domain_collections[domain_id] = domain_coll
             root.add_child(domain_coll)
 
-        # Create PER-ROW sub-collection under this domain (title includes region)
-        sub_id = f"{domain_id}-{row_id}"
-        sub_title = f"{domain_id}:{row_id} ({meta.region})"
-        sub_desc = (
-            f"Sub-collection for row id '{meta.id}' in domain '{meta.domain}'. "
-            f"Source: {meta.source}; Resolution: {meta.resolution}; Region: {meta.region}."
-        )
-        sub_coll = pystac.Collection(
-            id=sub_id,
-            title=sub_title,
-            description=sub_desc,
-            extent=pystac.Extent(
-                spatial=pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]]),
-                temporal=pystac.TemporalExtent([[None, None]]),
-            ),
-            license="proprietary",
-        )
-        domain_coll.add_child(sub_coll)
+        # Create REGION sub-collection under this domain
+        sub_id = f"{domain_id}-{region_id}"  # e.g., "conus-pacific-coos-bay-oregon"
+        sub_coll = sub_collections.get(sub_id)
+
+        if sub_coll is None:
+            sub_title = f"{meta.region} ({meta.domain})"
+            sub_desc = f"Topobathymetric DEM dataset collection for {meta.region} within the {meta.domain} domain."
+
+            sub_coll = pystac.Collection(
+                id=sub_id,
+                title=sub_title,
+                description=sub_desc,
+                extent=pystac.Extent(
+                    spatial=pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]]),
+                    temporal=pystac.TemporalExtent([[None, None]]),
+                ),
+                license="proprietary",
+            )
+            sub_collections[sub_id] = sub_coll
+            domain_coll.add_child(sub_coll)
 
         # Parse all asset URLs for this row
         raw_urls = parse_asset_urls(meta.asset_urls)
@@ -600,7 +679,7 @@ def main() -> None:
                 id=item_id,
                 geometry=geojson_polygon_from_bbox(item_bbox) if item_bbox else None,
                 bbox=item_bbox if item_bbox else None,
-                datetime=item_datetime,   # None allowed iff start/end in props
+                datetime=item_datetime,  # None allowed iff start/end in props
                 properties=props,
                 collection=sub_coll,
             )
@@ -614,7 +693,9 @@ def main() -> None:
             media_type = None
             hl = href.lower()
             if hl.endswith((".tif", ".tiff")):
-                media_type = pystac.MediaType.COG if "cog" in hl else pystac.MediaType.GEOTIFF
+                media_type = (
+                    pystac.MediaType.COG if "cog" in hl else pystac.MediaType.GEOTIFF
+                )
             elif hl.endswith(".vrt"):
                 media_type = "application/x-vrt"
             elif hl.endswith(".nc") or "thredds/dodsC" in hl or "opendap" in hl:
@@ -624,7 +705,9 @@ def main() -> None:
 
             item.add_asset(
                 key="data",
-                asset=pystac.Asset(href=href, media_type=media_type, roles=["data"], title=f"{fname}"),
+                asset=pystac.Asset(
+                    href=href, media_type=media_type, roles=["data"], title=f"{fname}"
+                ),
             )
 
             # Optional source link
@@ -636,16 +719,18 @@ def main() -> None:
 
             # Collect for GeoJSON export
             if item_bbox:
-                derived_bboxes.append({
-                    "id": item.id,
-                    "domain": meta.domain,
-                    "row_id": row_id,
-                    "region": meta.region,
-                    "source": meta.source,
-                    "resolution": meta.resolution,
-                    "href": href,
-                    "bbox": item_bbox,  # [minx, miny, maxx, maxy] in EPSG:4326
-                })
+                derived_bboxes.append(
+                    {
+                        "id": item.id,
+                        "domain": meta.domain,
+                        "row_id": row_id,
+                        "region": meta.region,
+                        "source": meta.source,
+                        "resolution": meta.resolution,
+                        "href": href,
+                        "bbox": item_bbox,  # [minx, miny, maxx, maxy] in EPSG:4326
+                    }
+                )
 
         # Tighten extents on sub and domain
         sub_coll.update_extent_from_items()
@@ -669,27 +754,31 @@ def main() -> None:
                 f.write(u + "\n")
         print(f"[report] wrote {len(deduped)} unreachable URL(s) → {report_path}")
     else:
-        print("\n[report] All asset URLs reachable 🎉")
+        print("\n[report] All asset URLs reachable")
 
     # --- Export derived bboxes as GeoJSON for QGIS/geojson.io ---
     if derived_bboxes:
         features = []
         for row in derived_bboxes:
             minx, miny, maxx, maxy = row["bbox"]
-            features.append({
-                "type": "Feature",
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [[
-                        [minx, miny],
-                        [minx, maxy],
-                        [maxx, maxy],
-                        [maxx, miny],
-                        [minx, miny],
-                    ]]
-                },
-                "properties": {k: v for k, v in row.items() if k != "bbox"}
-            })
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [minx, miny],
+                                [minx, maxy],
+                                [maxx, maxy],
+                                [maxx, miny],
+                                [minx, miny],
+                            ]
+                        ],
+                    },
+                    "properties": {k: v for k, v in row.items() if k != "bbox"},
+                }
+            )
         gj = {"type": "FeatureCollection", "features": features}
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         gj_path = OUT_DIR / "derived_bboxes.geojson"
