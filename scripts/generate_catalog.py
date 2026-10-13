@@ -8,9 +8,10 @@
 #     "xarray",
 #     "netcdf4",
 #     "gdal",
-#     "shapely"
+#     "shapely",
 #     "pydap"
 # ]
+# ///
 
 #!/usr/bin/env python3
 # scripts/generate_catalog.py
