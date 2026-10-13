@@ -7,7 +7,6 @@
 #     "rioxarray",
 #     "xarray",
 #     "netcdf4",
-#     "gdal",
 #     "shapely",
 #     "pydap"
 # ]
@@ -23,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,16 +71,21 @@ UNREACHABLE_URLS: List[str] = []
 # Env helpers (GDAL/PROJ on Windows/conda)
 # ----------------------------
 def ensure_gdal_env():
-    """Best effort: set GDAL/PROJ paths from CONDA_PREFIX if not already set."""
-    prefix = os.environ.get("CONDA_PREFIX")
+    """Set GDAL/PROJ paths on Windows if not already defined"""
+    if sys.platform != "win32":
+        return
+    
+    prefix = os.environ.get("CONDA_PREFIX") or os.environ.get("VIRTUAL_ENV") or sys.prefix
     if prefix:
-        os.environ.setdefault(
-            "GDAL_DATA", os.path.join(prefix, "Library", "share", "gdal")
-        )
-        os.environ.setdefault(
-            "PROJ_LIB", os.path.join(prefix, "Library", "share", "proj")
-        )
+        conda_gdal = os.path.join(prefix, "Library", "share", "gdal")
+        conda_proj = os.path.join(prefix, "Library", "share", "proj")
+    
+        if os.path.exists(conda_gdal):
+            os.environ.setdefault("GDAL_DATA", conda_gdal)
+        if os.path.exists(conda_proj):
+            os.environ.setdefault("PROJ_LIB", conda_proj)
 
+ensure_gdal_env()
 
 # ----------------------------
 # Dataclass (bbox/datetime optional)
@@ -319,7 +324,7 @@ def _bbox_epsg_from_geotiff_like(
         }
 
         # Check if AWS crendentials or profiles are active in the environment
-        if os.environ.get("AWS_ACCESS_KEY_ID") or os.envion.get("AWS_PROFILE"):
+        if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE"):
             env_opts["AWS_NO_SIGN_REQUEST"] = "NO"
             if os.environ.get("AWS_PROFILE"):
                 env_opts["AWS_PROFILE"] = os.environ.get("AWS_PROFILE")
@@ -664,10 +669,12 @@ def main() -> None:
                 **time_props,
                 "domain": meta.domain,
                 "region": meta.region,
+                "release_version": meta.release_version,
                 "source": meta.source,
                 "resolution": meta.resolution,
                 "horizontal_crs": meta.horizontal_crs,
-                "vertical_datum": meta.vertical_datum,
+                "original_vdatum": meta.original_vdatum,
+                "current_vdatum": meta.current_vdatum,
                 "vertical_datum_conversion": meta.vertical_datum_conversion,
                 "priority": meta.priority,
                 "source_url": meta.source_url,
