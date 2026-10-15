@@ -314,10 +314,17 @@ def _transform_to_wgs84(bounds, src_crs) -> Optional[List[float]]:
 def _bbox_epsg_from_geotiff_like(
     url: str,
 ) -> Optional[Tuple[List[float], Optional[int]]]:
-    """Handle .tif/.tiff, .zip and .vrt via rasterio abd active AWS credentials"""
+    """Handle .tif/.tiff, .zip and .vrt via rasterio and active AWS credentials"""
     try:
         import rasterio
 
+        # Translate S3 HTTPS endpoints to GDAL /vsis3/
+        s3_prefix = "https://spatial-water-noaa.s3.us-east-1.amazonaws.com/"
+        gdal_url = (
+            url.replace(s3_prefix, "/vsis3/spatial-water-noaa/")
+            if url.startswith(s3_prefix)
+            else url
+        )
         env_opts = {
             "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",  # speed over HTTP
             "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.xml,.zip",
@@ -335,7 +342,7 @@ def _bbox_epsg_from_geotiff_like(
             env_opts["AWS_NO_SIGN_REQUEST"] = "YES"
 
         with rasterio.Env(**env_opts):
-            with rasterio.open(url) as ds:
+            with rasterio.open(gdal_url) as ds:
                 b = ds.bounds  # (left, bottom, right, top) in ds.crs
                 crs = ds.crs
                 epsg = crs.to_epsg() if crs else None
@@ -760,7 +767,7 @@ def main() -> None:
         with report_path.open("w", encoding="utf-8") as f:
             for u in deduped:
                 f.write(u + "\n")
-        print(f"[report] wrote {len(deduped)} unreachable URL(s) → {report_path}")
+        print(f"[report] wrote {len(deduped)} unreachable URL(s) -> {report_path}")
     else:
         print("\n[report] All asset URLs reachable")
 
@@ -792,7 +799,7 @@ def main() -> None:
         gj_path = OUT_DIR / "derived_bboxes.geojson"
         with gj_path.open("w", encoding="utf-8") as f:
             json.dump(gj, f, indent=2)
-        print(f"[ok] wrote {len(features)} bbox feature(s) → {gj_path}")
+        print(f"[ok] wrote {len(features)} bbox feature(s) -> {gj_path}")
     else:
         print("[info] no bboxes derived; skipped GeoJSON export")
 
