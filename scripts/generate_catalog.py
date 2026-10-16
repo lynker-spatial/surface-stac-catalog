@@ -584,12 +584,25 @@ def main() -> None:
         row_id = sanitize_id(meta.id)  # CSV "id" becomes sub-collection id base
         region_id = sanitize_id(meta.region)
 
-        # Get or create DOMAIN collection
+
+        domain_names = {
+            "alaska": "Alaska", 
+            "conus-atlantic-gulf": "CONUS Atlantic-Gulf", 
+            "conus-pacific": "CONUS Pacific",
+            "great-lakes": "Great Lakes",
+            "hawaii": "Hawaii",
+            "puerto-rico-virgin-islands": "Puerto Rico & US Virgin Islands",
+        }
+        
+        # Get or create domain collection
         domain_coll = domain_collections.get(domain_id)
         if domain_coll is None:
+            
+            clean_title = domain_names.get(domain_id, domain_id.replace("-", " ").title())
+            
             domain_coll = pystac.Collection(
                 id=domain_id,
-                title=f"{domain_id} Datasets",
+                title=clean_title,
                 description=f"Topobathy data related to the {domain_id} domain.",
                 extent=pystac.Extent(
                     spatial=pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]]),
