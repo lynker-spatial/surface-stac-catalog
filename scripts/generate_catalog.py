@@ -335,6 +335,7 @@ def _bbox_epsg_from_geotiff_like(
             env_opts["AWS_NO_SIGN_REQUEST"] = "NO"
             if os.environ.get("AWS_PROFILE"):
                 env_opts["AWS_PROFILE"] = os.environ.get("AWS_PROFILE")
+                env_opts["AWS_SDK_LOAD_CONFIG"] = "1"
             if os.environ.get("AWS_DEFAULT_REGION"):
                 env_opts["AWS_DEFAULT_REGION"] = os.environ.get("AWS_DEFAULT_REGION")
         else:
