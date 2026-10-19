@@ -570,7 +570,7 @@ def main() -> None:
     root = pystac.Catalog(
         id="hydrofabric-topobathy-data",
         title="Hydrofabric Master Surface DEM Data Catalog",
-        description="A catalog of topobathymetry data sources for CONUS and oCONUS domains.",
+        description="A STAC catalog of topobathymetric digital elevation models (DEMs) data sources for CONUS and oCONUS domains supporting Office of Water Prediction (OWP) operations, including National Water Model (NWM) and the Flood Inundation Mapping (FIM) Program",
     )
 
     domain_collections: Dict[str, pystac.Collection] = {}
@@ -603,7 +603,7 @@ def main() -> None:
             domain_coll = pystac.Collection(
                 id=domain_id,
                 title=clean_title,
-                description=f"Topobathy data related to the {domain_id} domain.",
+                description=f"Topobathymetric surface elevation data sources for the {clean_title} region.",
                 extent=pystac.Extent(
                     spatial=pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]]),
                     temporal=pystac.TemporalExtent([[None, None]]),
