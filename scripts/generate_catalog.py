@@ -751,11 +751,17 @@ def main() -> None:
                 derived_bboxes.append(
                     {
                         "id": item.id,
-                        "domain": meta.domain,
                         "row_id": row_id,
+                        "domain": meta.domain,
                         "region": meta.region,
-                        "source": meta.source,
+                        "release_version": getattr(meta, "release_version", None),
+                        "source": meta.source, 
                         "resolution": meta.resolution,
+                        "horizontal_crs": getattr(meta, "horizontal_crs", None),
+                        "original_vdatum": getattr(meta, "original_vdatum", None),
+                        "current_vdatum": getattr(meta, "current_vdatum", None),
+                        "vertical_datum_conversion": getattr(meta, "vertical_datum_conversion", None), 
+                        "priority": getattr(meta, "priority", None),
                         "href": href,
                         "bbox": item_bbox,  # [minx, miny, maxx, maxy] in EPSG:4326
                     }
